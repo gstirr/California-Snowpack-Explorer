@@ -1,17 +1,28 @@
 
 import json
+import math
 import os
 from pathlib import Path
 
 from arcgis.gis import GIS
 from arcgis.features import FeatureLayer
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 PORTAL_URL = "https://geochicoonline.maps.arcgis.com"
 LAYER_ITEM_ID = "a491f2c9260b4b3db8f50b8988a6048c"
 GEOJSON_PATH = Path("outputs/snowpack_stations_current.geojson")
 
-# Writing is disabled until explicitly enabled in GitHub Actions.
-WRITE_ENABLED = os.getenv("AGOL_WRITE_ENABLED", "false").lower() == "true"
+# Keep disabled until the dry run succeeds.
+WRITE_ENABLED = (
+    os.getenv("AGOL_WRITE_ENABLED", "false").lower() == "true"
+)
+
+# --------------------------------------------------
+# CONNECT TO ARCGIS ONLINE
+# --------------------------------------------------
 
 gis = GIS(
     PORTAL_URL,
@@ -22,20 +33,44 @@ gis = GIS(
 if gis.users.me is None:
     raise RuntimeError("ArcGIS authentication failed.")
 
+print("ArcGIS authentication successful.")
+
 item = gis.content.get(LAYER_ITEM_ID)
 
-if item is None or item.type != "Feature Service":
-    raise RuntimeError("Expected a hosted feature service item.")
+if item is None:
+    raise RuntimeError("Hosted feature layer item not found.")
 
-if not item.layers:
-    raise RuntimeError("No feature layers found in this service.")
+print(f"Item title: {item.title}")
+print(f"Item type: {item.type}")
+print(f"Service URL: {item.url}")
 
-layer = item.layers[0]
+if item.type != "Feature Service":
+    raise RuntimeError("Expected a Feature Service item.")
 
-print(f"Connected to: {item.title}")
-print(f"Feature layer: {layer.properties.name}")
+# Connect directly through the service URL.
+# This avoids the item.layers issue from the previous run.
 
-# Read the latest generated GeoJSON.
+service_url = (item.url or "").rstrip("/")
+
+if service_url.endswith("/FeatureServer"):
+    layer_url = service_url + "/0"
+elif "/FeatureServer/" in service_url:
+    layer_url = service_url
+else:
+    raise RuntimeError("Invalid feature layer service URL.")
+
+layer = FeatureLayer(layer_url, gis=gis)
+
+print(f"Connected to layer: {layer.properties.name}")
+print(f"Existing station count: {layer.query(return_count_only=True)}")
+
+# --------------------------------------------------
+# LOAD GEOJSON
+# --------------------------------------------------
+
+if not GEOJSON_PATH.exists():
+    raise FileNotFoundError(f"Missing GeoJSON: {GEOJSON_PATH}")
+
 with GEOJSON_PATH.open(encoding="utf-8") as f:
     geojson = json.load(f)
 
@@ -44,7 +79,12 @@ source_features = geojson["features"]
 if not source_features:
     raise RuntimeError("GeoJSON contains no stations.")
 
-# Read the actual ArcGIS schema.
+print(f"GeoJSON stations: {len(source_features)}")
+
+# --------------------------------------------------
+# INSPECT FIELD STRUCTURE
+# --------------------------------------------------
+
 fields = {
     field["name"].lower(): field
     for field in layer.properties.fields
@@ -56,20 +96,6 @@ if "station_id" not in fields:
 id_field = fields["station_id"]["name"]
 oid_field = layer.properties.objectIdField
 
-# Never overwrite system-managed fields.
-excluded = {
-    oid_field.lower(),
-    id_field.lower(),
-    "globalid",
-    "shape__area",
-    "shape__length",
-    "creationdate",
-    "creator",
-    "editdate",
-    "editor",
-}
-
-# Identify compatible fields by their actual names.
 source_properties = source_features[0]["properties"]
 
 source_field_names = {
@@ -82,9 +108,33 @@ if "station_id" not in source_field_names:
 
 source_id_field = source_field_names["station_id"]
 
+# Protect system-managed ArcGIS fields.
+
+excluded = {
+    oid_field.lower(),
+    id_field.lower(),
+    "globalid",
+    "shape__area",
+    "shape__length",
+    "creationdate",
+    "creator",
+    "editdate",
+    "editor",
+}
+
+supported_types = {
+    "esriFieldTypeString",
+    "esriFieldTypeInteger",
+    "esriFieldTypeSmallInteger",
+    "esriFieldTypeSingle",
+    "esriFieldTypeDouble",
+    "esriFieldTypeBigInteger",
+}
+
 editable_fields = {}
 
 for lower_name, field in fields.items():
+
     if lower_name in excluded:
         continue
 
@@ -94,15 +144,7 @@ for lower_name, field in fields.items():
     if not field.get("editable", True):
         continue
 
-    # Avoid incorrectly converting dates or unsupported field types.
-    if field["type"] not in {
-        "esriFieldTypeString",
-        "esriFieldTypeInteger",
-        "esriFieldTypeSmallInteger",
-        "esriFieldTypeSingle",
-        "esriFieldTypeDouble",
-        "esriFieldTypeBigInteger",
-    }:
+    if field["type"] not in supported_types:
         continue
 
     editable_fields[field["name"]] = (
@@ -110,8 +152,7 @@ for lower_name, field in fields.items():
         field,
     )
 
-print(f"GeoJSON stations: {len(source_features)}")
-print(f"Hosted layer stations: {layer.query(return_count_only=True)}")
+print("\n--- FIELD MATCHING ---")
 print(f"Matching editable fields: {list(editable_fields)}")
 
 if not editable_fields:
@@ -119,7 +160,10 @@ if not editable_fields:
         "No matching editable fields. No updates performed."
     )
 
-# Retrieve existing station IDs and OBJECTIDs.
+# --------------------------------------------------
+# RETRIEVE EXISTING STATIONS
+# --------------------------------------------------
+
 existing = layer.query(
     where="1=1",
     out_fields=f"{oid_field},{id_field}",
@@ -128,11 +172,14 @@ existing = layer.query(
 )
 
 def normalize_id(value):
-    return str(value).strip().upper() if value is not None else ""
+    if value is None:
+        return ""
+    return str(value).strip().upper()
 
 station_lookup = {}
 
 for feature in existing.features:
+
     attrs = feature.attributes
     station_id = normalize_id(attrs.get(id_field))
 
@@ -140,17 +187,27 @@ for feature in existing.features:
         continue
 
     if station_id in station_lookup:
-        raise RuntimeError(f"Duplicate hosted station: {station_id}")
+        raise RuntimeError(
+            f"Duplicate hosted station: {station_id}"
+        )
 
     station_lookup[station_id] = attrs[oid_field]
 
+print(f"Existing stations indexed: {len(station_lookup)}")
+
+# --------------------------------------------------
+# CONVERT ATTRIBUTE VALUES
+# --------------------------------------------------
+
 def convert_value(value, field):
+
     if value is None or value == "":
         return None
 
     field_type = field["type"]
 
     if field_type == "esriFieldTypeString":
+
         value = str(value)
         max_length = field.get("length")
 
@@ -166,31 +223,48 @@ def convert_value(value, field):
         "esriFieldTypeSmallInteger",
         "esriFieldTypeBigInteger",
     }:
+
         number = float(value)
 
-        if not number.is_integer():
+        if not math.isfinite(number) or not number.is_integer():
             raise ValueError(
-                f"Non-integer value for {field['name']}: {value}"
+                f"Invalid integer for {field['name']}: {value}"
             )
 
         return int(number)
 
-    return float(value)
+    number = float(value)
 
-# Prepare updates without changing geometries.
+    if not math.isfinite(number):
+        return None
+
+    return number
+
+# --------------------------------------------------
+# PREPARE STATION UPDATES
+# --------------------------------------------------
+
 updates = []
 unmatched = []
 seen = set()
 
 for feature in source_features:
+
     properties = feature["properties"]
-    station_id = normalize_id(properties.get(source_id_field))
+
+    station_id = normalize_id(
+        properties.get(source_id_field)
+    )
 
     if not station_id:
-        raise RuntimeError("Source station has no Station_ID.")
+        raise RuntimeError(
+            "Source station has no Station_ID."
+        )
 
     if station_id in seen:
-        raise RuntimeError(f"Duplicate source station: {station_id}")
+        raise RuntimeError(
+            f"Duplicate source station: {station_id}"
+        )
 
     seen.add(station_id)
 
@@ -203,43 +277,71 @@ for feature in source_features:
     }
 
     for target_name, (source_name, field) in editable_fields.items():
+
         value = properties.get(source_name)
 
-        # Preserve existing values when source data is missing.
+        # Preserve existing values when data is missing.
         if value is None or value == "":
             continue
 
-        attributes[target_name] = convert_value(value, field)
+        converted = convert_value(value, field)
+
+        if converted is None:
+            continue
+
+        attributes[target_name] = converted
 
     if len(attributes) > 1:
-        updates.append({"attributes": attributes})
+        updates.append({
+            "attributes": attributes
+        })
 
+# --------------------------------------------------
+# VALIDATE BEFORE WRITING
+# --------------------------------------------------
+
+print("\n--- UPDATE SUMMARY ---")
+print(f"Source stations: {len(source_features)}")
+print(f"Existing hosted stations: {len(station_lookup)}")
 print(f"Stations ready to update: {len(updates)}")
 print(f"Unmatched source stations: {len(unmatched)}")
 print(f"Unmatched IDs: {unmatched[:20]}")
 
-# Prevent large unexpected mismatches.
-if len(updates) < 20 or len(updates) < len(source_features) * 0.8:
+if (
+    len(updates) < 20
+    or len(updates) < len(source_features) * 0.8
+):
     raise RuntimeError(
         "Too many unmatched stations. Updates cancelled."
     )
 
+# --------------------------------------------------
+# DRY RUN OR LIVE UPDATE
+# --------------------------------------------------
+
 if not WRITE_ENABLED:
-    print("DRY RUN SUCCESSFUL.")
+
+    print("\nDRY RUN SUCCESSFUL.")
     print("No ArcGIS records were modified.")
+
 else:
+
     capabilities = layer.properties.capabilities
 
-    if "Update" not in capabilities.split(","):
+    if "Update" not in [
+        capability.strip()
+        for capability in capabilities.split(",")
+    ]:
         raise RuntimeError(
-            f"Layer does not advertise Update capability: {capabilities}"
+            f"Layer does not support updates: {capabilities}"
         )
 
-    print("Updating ArcGIS hosted feature layer...")
+    print("\nUpdating ArcGIS hosted feature layer...")
 
     updated = 0
 
     for start in range(0, len(updates), 50):
+
         batch = updates[start:start + 50]
 
         result = layer.edit_features(
@@ -257,7 +359,9 @@ else:
             )
 
         updated += len(results)
+
         print(f"Updated {updated} stations.")
 
-    print(f"SUCCESS: Updated {updated} stations.")
-    print("Existing geometries and layer item ID preserved.")
+    print(f"\nSUCCESS: Updated {updated} stations.")
+    print("Existing geometries preserved.")
+    print("Feature layer item ID unchanged.")
