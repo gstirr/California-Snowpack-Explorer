@@ -1,3 +1,4 @@
+
 name: Update California Snowpack
 
 on:
@@ -34,11 +35,11 @@ jobs:
       - name: Run automated tests
         run: python tests/test_outputs.py
 
-      - name: Test ArcGIS Online connection
-        if: github.event_name == 'workflow_dispatch'
+      - name: Update ArcGIS Online snowpack layer
         env:
           AGOL_USERNAME: ${{ secrets.AGOL_USERNAME }}
           AGOL_PASSWORD: ${{ secrets.AGOL_PASSWORD }}
+          AGOL_WRITE_ENABLED: "true"
         run: |
           pip install arcgis
           python update_arcgis.py
