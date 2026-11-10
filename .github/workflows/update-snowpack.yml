@@ -34,6 +34,15 @@ jobs:
       - name: Run automated tests
         run: python tests/test_outputs.py
 
+      - name: Test ArcGIS Online connection
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          AGOL_USERNAME: ${{ secrets.AGOL_USERNAME }}
+          AGOL_PASSWORD: ${{ secrets.AGOL_PASSWORD }}
+        run: |
+          pip install arcgis
+          python update_arcgis.py
+
       - name: Update public interactive map
         run: |
           cp outputs/california_snow_sensor_map.html california_snow_sensor_map.html
