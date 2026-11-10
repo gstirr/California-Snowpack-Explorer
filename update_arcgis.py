@@ -4,7 +4,7 @@ from arcgis.gis import GIS
 from arcgis.features import FeatureLayer
 
 PORTAL_URL = "https://geochicoonline.maps.arcgis.com"
-LAYER_ITEM_ID = "45bf7b8ead57497e94810ecbed1b61a5"
+LAYER_ITEM_ID = "a491f2c9260b4b3db8f50b8988a6048c"
 
 gis = GIS(
     PORTAL_URL,
