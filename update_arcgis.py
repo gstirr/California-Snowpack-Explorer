@@ -1,36 +1,42 @@
 
 import os
 from arcgis.gis import GIS
+from arcgis.features import FeatureLayer
 
 PORTAL_URL = "https://geochicoonline.maps.arcgis.com"
 LAYER_ITEM_ID = "45bf7b8ead57497e94810ecbed1b61a5"
 
-# Authenticate using GitHub Actions Secrets
 gis = GIS(
     PORTAL_URL,
     os.environ["AGOL_USERNAME"],
     os.environ["AGOL_PASSWORD"]
 )
 
-# Verify authentication
 user = gis.users.me
 if user is None:
     raise RuntimeError("ArcGIS authentication failed.")
 
-print(f"Authenticated as: {user.username}")
+print("ArcGIS authentication successful.")
 
-# Find the existing hosted feature layer
 item = gis.content.get(LAYER_ITEM_ID)
-
 if item is None:
-    raise RuntimeError("Hosted feature layer not found.")
+    raise RuntimeError("Item not found.")
 
-if not item.layers:
-    raise RuntimeError("Item contains no feature layers.")
+print(f"Item title: {item.title}")
+print(f"Item type: {item.type}")
+print(f"Service URL: {item.url}")
 
-layer = item.layers[0]
+# Access the feature layer directly using its service URL.
+service_url = (item.url or "").rstrip("/")
 
-print(f"Found layer: {item.title}")
-print(f"Layer owner: {item.owner}")
+if service_url.endswith("/FeatureServer"):
+    layer_url = service_url + "/0"
+elif "/FeatureServer/" in service_url:
+    layer_url = service_url
+else:
+    raise RuntimeError("Item does not have a valid feature layer URL.")
+
+layer = FeatureLayer(layer_url, gis=gis)
+
 print(f"Station count: {layer.query(return_count_only=True)}")
 print("Connection test successful. No data modified.")
