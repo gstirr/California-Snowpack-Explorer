@@ -65,3 +65,18 @@ print(f"Geometry type: {layer.properties.geometryType}")
 print(f"Editing capabilities: {layer.properties.capabilities}")
 
 print("\nField inspection complete. No data modified.")
+
+summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+
+if summary_path:
+    with open(summary_path, "a", encoding="utf-8") as report:
+        report.write("## ArcGIS Field Inspection\n\n")
+        report.write(f"GeoJSON stations: {len(features)}\n\n")
+        report.write("### GeoJSON Fields\n")
+        report.write("\n".join(f"- {name}" for name in features[0]["properties"]))
+        report.write("\n\n### Hosted Layer Fields\n")
+        report.write("\n".join(
+            f"- {field['name']} ({field['type']})"
+            for field in layer.properties.fields
+        ))
+        report.write(f"\n\nEditing capabilities: {layer.properties.capabilities}\n")
